@@ -1,0 +1,2 @@
+exp1:exp2:exp3:exp4:final_exp
+-DCATKIN_DEVEL_PREFIX=/home/haojiechen/file_mess/DIP/dip_ws/devel -DCMAKE_INSTALL_PREFIX=/home/haojiechen/file_mess/DIP/dip_ws/install -G Unix Makefiles

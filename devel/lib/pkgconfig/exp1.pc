@@ -1,0 +1,8 @@
+prefix=/home/haojiechen/file_mess/DIP/dip_ws/devel
+
+Name: exp1
+Description: Description of exp1
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

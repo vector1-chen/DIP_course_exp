@@ -1,0 +1,8 @@
+prefix=/home/haojiechen/file_mess/DIP/dip_ws/install
+
+Name: exp4
+Description: Description of exp4
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

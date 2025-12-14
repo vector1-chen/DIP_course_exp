@@ -51,9 +51,11 @@ private:
 
     // 控制参数
     const double KP_LANE = 0.006;   // 循迹比例控制系数
-    const double KI_LANE = 0.001;   // --- ADDED IN EDIT ---
-    double integral_error_ = 0.0; // --- ADDED IN EDIT ---
+    const double KI_LANE = 0.001;   // 循迹积分控制系数
+    double integral_lane = 0.0; // 循迹积分误差
     const double KP_TRACK = 0.008;  // 跟踪比例控制系数
+    const double KI_TRACK = 0.002;  // 跟踪积分控制系数
+    double integral_track = 0.0; // 跟踪积分误差
     const double LINEAR_SPEED = 0.2; // 默认线速度 (m/s)
     const int IMG_CENTER_X = 320;    // 假设图像宽度 640/2
 

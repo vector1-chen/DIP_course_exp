@@ -17,7 +17,7 @@ enum CameraState
     ZED,
     REALSENSE
 };
-CameraState state = REALSENSE;  // 修改为使用RealSense7摄像头
+CameraState state = REALSENSE;
 
 // 定义机器人状态
 enum State {
@@ -40,24 +40,30 @@ private:
     int lost_cones_counter_;        // 锥桶丢失计数，用于判断驶出赛道
     int avoid_timer_;               // 避障计时器
     int obstacle_count_;            // 避障计数器 (1 or 2)
+
+    const int cols = 640;  // 图像宽度
+    const int rows = 480;  // 图像高度
     
     // 橙色锥桶 HSV 范围 (默认值，需要校准)
     const Scalar cone_lower = Scalar(153, 45, 47); 
     const Scalar cone_upper = Scalar(180, 255, 255);
     
-    // 红色目标数字 HSV 范围 (默认值，需要校准)
+    // 红色目标数字 HSV 范围 (默认值，需要校准)?
     const Scalar target_lower = Scalar(180, 255, 255);
     const Scalar target_upper = Scalar(180, 255, 255);
 
     // 控制参数?
     const double KP_LANE = 0.012;   // 循迹比例控制系数
-    const double KI_LANE = 0.002;   // 循迹积分控制系数
+    const double KI_LANE = 0.000;   // 循迹积分控制系数
     double integral_lane = 0.0; // 循迹积分误差
     const double KP_TRACK = 0.008;  // 跟踪比例控制系数
-    const double KI_TRACK = 0.002;  // 跟踪积分控制系数
+    const double KI_TRACK = 0.000;  // 跟踪积分控制系数
     double integral_track = 0.0; // 跟踪积分误差
     const double LINEAR_SPEED = 0.2; // 默认线速度 (m/s)
     const int IMG_CENTER_X = 320;    // 假设图像宽度 640/2
+    
+    const int detect_lane_point1[] = {2 * rows / 3, cols /6}; // 检测框左上点
+    const int detect_lane_point2[] = {rows - 10, cols * 5 / 6}; // 检测框右下点
 
 public:
     RobotVisionController() : it_(nh_), current_state_(STATE_LANE_FOLLOW), lost_cones_counter_(0), avoid_timer_(0), obstacle_count_(0) {
@@ -100,6 +106,7 @@ public:
     void imageCb(const sensor_msgs::ImageConstPtr& msg) {
         cv_bridge::CvImageConstPtr cv_ptr;
         cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
+        ROS_INFO_ONCE("Received first image frame.");
         processImage(cv_ptr->image);
     }
 
@@ -146,11 +153,16 @@ public:
         Mat kernel = getStructuringElement(MORPH_RECT, Size(5, 5));
         morphologyEx(mask, mask, MORPH_OPEN, kernel);
 
-        mask = mask(Range(mask.rows / 3, mask.rows), Range::all()); // 只关注下半部分图像
+        Mat mask_cut = zeros(mask.size(), mask.type());
+        // 只关注检测框内区域
+        mask_cut(Range(detect_lane_point1[0], detect_lane_point2[0]),
+                 Range(detect_lane_point1[1], detect_lane_point2[1])) = 
+                 mask(Range(detect_lane_point1[0], detect_lane_point2[0]),
+                      Range(detect_lane_point1[1], detect_lane_point2[1]));
 
         // 寻找轮廓
         vector<vector<Point>> contours;
-        findContours(mask, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        findContours(mask_cut, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
 
         if (contours.empty()) {
             lost_cones_counter_++;
@@ -186,7 +198,7 @@ public:
             }
         }
         
-        // 绿色路线避障触发逻辑
+        // 路线避障触发逻辑
         if (obstacle_detected) {
             obstacle_count_++;
             avoid_timer_ = 0; // 重置计时器
@@ -208,11 +220,13 @@ public:
 
         // PI 控制器
         integral_lane += error;
-        if (integral_lane > 1000) integral_lane = 1000;
-        if (integral_lane < -1000) integral_lane = -1000;
+        if (integral_lane > 100) integral_lane = 100;
+        if (integral_lane < -100) integral_lane = -100;
         cmd.angular.z = KP_LANE * error + KI_LANE * integral_lane;
         cmd.linear.x = LINEAR_SPEED;
         
+        // 调试显示
+        rectangle(mask, Point(detect_lane_point1[0], detect_lane_point1[1]), Point(detect_lane_point2[0], detect_lane_point2[1]), Scalar(0, 255, 0), 2);
         cv::imshow("Debug Mask", mask);
     }
     
@@ -242,7 +256,7 @@ public:
     }
 
     /**
-     * 寻找目标模式：原地旋转寻找红色数字纸张
+     * 寻找目标模式：原地旋转寻找数字纸张
      */
     void handleTargetSearch(Mat hsv, geometry_msgs::Twist &cmd) {
         Mat mask_target;

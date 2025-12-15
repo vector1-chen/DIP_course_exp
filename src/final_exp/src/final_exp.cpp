@@ -17,7 +17,7 @@ enum CameraState
     ZED,
     REALSENSE
 };
-CameraState state = COMPUTER;  // 修改为使用电脑摄像头
+CameraState state = REALSENSE;  // 修改为使用RealSense7摄像头
 
 // 定义机器人状态
 enum State {
@@ -42,16 +42,16 @@ private:
     int obstacle_count_;            // 避障计数器 (1 or 2)
     
     // 橙色锥桶 HSV 范围 (默认值，需要校准)
-    const Scalar cone_lower = Scalar(0, 100, 100); 
-    const Scalar cone_upper = Scalar(20, 255, 255);
+    const Scalar cone_lower = Scalar(153, 45, 47); 
+    const Scalar cone_upper = Scalar(180, 255, 255);
     
     // 红色目标数字 HSV 范围 (默认值，需要校准)
-    const Scalar target_lower = Scalar(160, 100, 100);
+    const Scalar target_lower = Scalar(180, 255, 255);
     const Scalar target_upper = Scalar(180, 255, 255);
 
-    // 控制参数
-    const double KP_LANE = 0.006;   // 循迹比例控制系数
-    const double KI_LANE = 0.001;   // 循迹积分控制系数
+    // 控制参数?
+    const double KP_LANE = 0.012;   // 循迹比例控制系数
+    const double KI_LANE = 0.002;   // 循迹积分控制系数
     double integral_lane = 0.0; // 循迹积分误差
     const double KP_TRACK = 0.008;  // 跟踪比例控制系数
     const double KI_TRACK = 0.002;  // 跟踪积分控制系数
@@ -146,6 +146,8 @@ public:
         Mat kernel = getStructuringElement(MORPH_RECT, Size(5, 5));
         morphologyEx(mask, mask, MORPH_OPEN, kernel);
 
+        mask = mask(Range(mask.rows / 3, mask.rows), Range::all()); // 只关注下半部分图像
+
         // 寻找轮廓
         vector<vector<Point>> contours;
         findContours(mask, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
@@ -170,10 +172,12 @@ public:
             Moments M = moments(contour);
             if (M.m00 > 0) {
                 double cx = M.m10 / M.m00;
+                double cy = M.m01 / M.m00;
                 double area = contourArea(contour);
+                if (area < 100) continue; // 忽略过小轮廓
 
                 // **障碍物检测启发式：** 面积巨大且靠近图像中心
-                if (area > 30000 && cx > 200 && cx < 440) { // 阈值需调试
+                if (area > 50000 && cx > 260 && cx < 380 && cy > 240 ) { // 阈值需调试
                     obstacle_detected = true;
                 }
                 
@@ -200,13 +204,13 @@ public:
 
         // 普通循迹控制 (基于所有锥桶的平均重心)
         double avg_x = sum_x / contour_count;
-        double error = IMG_CENTER_X - avg_x; // 错误：中心偏差
+        double error = -IMG_CENTER_X + avg_x; // 错误：中心偏差
 
         // PI 控制器
-        integral_error_ += error;
-        if (integral_error_ > 1000) integral_error_ = 1000;
-        if (integral_error_ < -1000) integral_error_ = -1000;
-        cmd.angular.z = KP_LANE * error + KI_LANE * integral_error_;
+        integral_lane += error;
+        if (integral_lane > 1000) integral_lane = 1000;
+        if (integral_lane < -1000) integral_lane = -1000;
+        cmd.angular.z = KP_LANE * error + KI_LANE * integral_lane;
         cmd.linear.x = LINEAR_SPEED;
         
         cv::imshow("Debug Mask", mask);
@@ -217,7 +221,7 @@ public:
      */
     void handleObstacleAvoidance(Mat hsv, geometry_msgs::Twist &cmd) {
         avoid_timer_++;
-        const int AVOID_DURATION = 100; // 绕行持续时间 (帧数)
+        const int AVOID_DURATION = 20; // 绕行持续时间 (帧数)
 
         if (current_state_ == STATE_OBSTACLE_1_AVOID) {
             // 第一个障碍：向左绕行
@@ -289,7 +293,10 @@ public:
             
             // 跟踪控制：调整角度以使目标居中
             double error = IMG_CENTER_X - cx;
-            cmd.angular.z = KP_TRACK * error;
+            integral_track += error;
+            if (integral_track > 1000) integral_track = 1000;
+            if (integral_track < -1000) integral_track = -1000;
+            cmd.angular.z = KP_TRACK * error + KI_TRACK * integral_track;
             
             // 距离控制：根据面积调整线速度 (防止碰撞)
             if (max_area > 80000) { // 目标太近

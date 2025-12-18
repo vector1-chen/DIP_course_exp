@@ -17,7 +17,7 @@ enum CameraState
     ZED,
     REALSENSE
 };
-CameraState state = REALSENSE;  // 修改为使用RealSense7摄像头
+CameraState state = REALSENSE;  // 修改为使用电脑摄像头
 
 // 定义机器人状态
 enum State {
@@ -40,6 +40,11 @@ private:
     int lost_cones_counter_;        // 锥桶丢失计数，用于判断驶出赛道
     int avoid_timer_;               // 避障计时器
     int obstacle_count_;            // 避障计数器 (1 or 2)
+    int area_count;
+
+    int frame_width = 640;  // 假设图像宽度
+    int frame_height = 480; // 假设图像高度
+    int IMG_CENTER_X = 320;    // 假设图像宽度 640/2
     
     // 橙色锥桶 HSV 范围 (默认值，需要校准)
     const Scalar cone_lower = Scalar(153, 45, 47); 
@@ -49,18 +54,18 @@ private:
     const Scalar target_lower = Scalar(180, 255, 255);
     const Scalar target_upper = Scalar(180, 255, 255);
 
-    // 控制参数?
-    const double KP_LANE = 0.012;   // 循迹比例控制系数
-    const double KI_LANE = 0.002;   // 循迹积分控制系数
+    // 控制参数
+    const double KP_LANE = 0.003;   // 循迹比例控制系数
+    const double KI_LANE = 0.000;   // 循迹积分控制系数
     double integral_lane = 0.0; // 循迹积分误差
     const double KP_TRACK = 0.008;  // 跟踪比例控制系数
-    const double KI_TRACK = 0.002;  // 跟踪积分控制系数
+    const double KI_TRACK = 0.000;  // 跟踪积分控制系数
     double integral_track = 0.0; // 跟踪积分误差
-    const double LINEAR_SPEED = 0.2; // 默认线速度 (m/s)
-    const int IMG_CENTER_X = 320;    // 假设图像宽度 640/2
+    const double LINEAR_SPEED = 0.4; // 默认线速度 (m/s)
+
 
 public:
-    RobotVisionController() : it_(nh_), current_state_(STATE_LANE_FOLLOW), lost_cones_counter_(0), avoid_timer_(0), obstacle_count_(0) {
+    RobotVisionController() : it_(nh_), current_state_(STATE_LANE_FOLLOW), lost_cones_counter_(0), avoid_timer_(0), obstacle_count_(0), avoid_phase_(FORWARD0), phase_timer_(0) {
         // 订阅摄像头话题 - 统一使用 ROS 话题订阅
         std::string camera_topic;
         
@@ -110,6 +115,11 @@ public:
         // 预处理：高斯模糊去噪，转换HSV
         GaussianBlur(img, img, Size(5, 5), 0);
         cvtColor(img, hsv, COLOR_BGR2HSV);
+        frame_width = img.cols;
+        frame_height = img.rows;
+        IMG_CENTER_X = frame_width / 2;
+        ROS_INFO_ONCE("Image size: %dx%d", frame_width, frame_height);
+        ROS_INFO_ONCE("Image center X: %d", IMG_CENTER_X);
 
         // 状态
         switch (current_state_) {
@@ -143,8 +153,14 @@ public:
         inRange(hsv, cone_lower, cone_upper, mask);
         
         // 形态学操作：开运算去噪
-        Mat kernel = getStructuringElement(MORPH_RECT, Size(5, 5));
+        Mat kernel = getStructuringElement(MORPH_RECT, Size(95, 95));
         morphologyEx(mask, mask, MORPH_OPEN, kernel);
+        // 形态学操作：闭运算连接锥桶区域
+        // kernel = getStructuringElement(MORPH_RECT, Size(60, 60));
+        // morphologyEx(mask, mask, MORPH_CLOSE, kernel);
+        // 形态学操作：长方形膨胀增强锥桶区域
+        kernel = getStructuringElement(MORPH_RECT, Size(7, 200));
+        morphologyEx(mask, mask, MORPH_DILATE, kernel);
 
         mask = mask(Range(mask.rows / 3, mask.rows), Range::all()); // 只关注下半部分图像
 
@@ -152,20 +168,20 @@ public:
         vector<vector<Point>> contours;
         findContours(mask, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
 
-        if (contours.empty()) {
-            lost_cones_counter_++;
-            if (lost_cones_counter_ > 50) { // 连续丢失超过50帧，切换到寻找模式
-                current_state_ = STATE_SEARCH_TARGET;
-                ROS_INFO("Cones lost, switching to Target Search Mode.");
-            }
-            cmd.linear.x = 0.0;
-            return;
-        } else {
-            lost_cones_counter_ = 0;
-        }
+        // if (contours.empty()) {
+        //     lost_cones_counter_++;
+        //     if (lost_cones_counter_ > 50) { // 连续丢失超过50帧，切换到寻找模式
+        //         current_state_ = STATE_SEARCH_TARGET;
+        //         ROS_INFO("Cones lost, switching to Target Search Mode.");
+        //     }
+        //     cmd.linear.x = 0.0;
+        //     return;
+        // } else {
+        //     lost_cones_counter_ = 0;
+        // }
 
-        double sum_x = 0;
-        int contour_count = 0;
+        double sum_x_left = 0, sum_x_right = 0;
+        int contour_count_left = 0, contour_count_right = 0;
         bool obstacle_detected = false;
 
         for (const auto& contour : contours) {
@@ -176,18 +192,38 @@ public:
                 double area = contourArea(contour);
                 if (area < 100) continue; // 忽略过小轮廓
 
+                if (area < 3500) continue; // 忽略过小轮廓噪声
+
                 // **障碍物检测启发式：** 面积巨大且靠近图像中心
-                if (area > 50000 && cx > 260 && cx < 380 && cy > 240 ) { // 阈值需调试
-                    obstacle_detected = true;
+                if (area > 85000 && cx > IMG_CENTER_X - IMG_CENTER_X /5 && cx < IMG_CENTER_X + IMG_CENTER_X /5) { // 阈值需调试
+                    area_count++;
+                    if (area_count > 5)
+                    {
+                        obstacle_detected = true;
+                        area_count = 0;
+                    }
+                }
+                else if (cx > IMG_CENTER_X - IMG_CENTER_X /5 && cx < IMG_CENTER_X + IMG_CENTER_X /5)
+                {
+                    area_count = 0;
                 }
                 
-                sum_x += cx;
-                contour_count++;
+                if (cx < IMG_CENTER_X) {
+                    sum_x_left += cx;
+                    contour_count_left++;
+                } else {
+                    sum_x_right += cx;
+                    contour_count_right++;
+                }
             }
         }
         
+        double avg_x_left = contour_count_left > 0 ? sum_x_left / contour_count_left : 0;
+        double avg_x_right = contour_count_right > 0 ? sum_x_right / contour_count_right : 0;
+        
         // 绿色路线避障触发逻辑
         if (obstacle_detected) {
+
             obstacle_count_++;
             avoid_timer_ = 0; // 重置计时器
             if (obstacle_count_ == 1) {
@@ -203,8 +239,10 @@ public:
         }
 
         // 普通循迹控制 (基于所有锥桶的平均重心)
-        double avg_x = sum_x / contour_count;
-        double error = -IMG_CENTER_X + avg_x; // 错误：中心偏差
+        double avg_x = contour_count_left + contour_count_right > 0 ? 
+                        (sum_x_left + sum_x_right) / (contour_count_left + contour_count_right) : 
+                        IMG_CENTER_X;
+        double error = IMG_CENTER_X - avg_x; // 错误：中心偏差
 
         // PI 控制器
         integral_lane += error;
@@ -219,25 +257,121 @@ public:
     /**
      * 障碍物规避模式 (简化为计时控制)
      */
+    enum AvoidPhase {
+        AVOID_TURN_RIGHT1,
+        AVOID_TURN_LEFT1, 
+        AVOID_TURN_RIGHT_CORRECT, 
+        AVOID_TURN_LEFT2,
+        AVOID_TURN_RIGHT2,
+        FORWARD0,
+        FORWARD1,
+        FORWARD2,
+        AVOID_TURN_RIGHT3
+    };
+
+    AvoidPhase avoid_phase_;
+    int phase_timer_;  // 每个阶段的计时器
+
     void handleObstacleAvoidance(Mat hsv, geometry_msgs::Twist &cmd) {
-        avoid_timer_++;
-        const int AVOID_DURATION = 20; // 绕行持续时间 (帧数)
+        phase_timer_++;
+        
+        switch(avoid_phase_) {
+            case FORWARD0:
+                cmd.linear.x = 0.0;
+                cmd.angular.z = -0.25;
+                if(phase_timer_ > 70) {
+                    avoid_phase_ = AVOID_TURN_RIGHT1;
+                    phase_timer_ = 0;
+                    ROS_INFO("FORWARD0 Phase");
+                }
+                break;
+            case AVOID_TURN_RIGHT1:
+                // 阶段1：右转90度（约30帧 @ 30fps = 1秒）
+                cmd.linear.x = 0.2;
+                cmd.angular.z = 0.0;  // 右转
+                if(phase_timer_ > 100) {
+                    avoid_phase_ = FORWARD1;
+                    phase_timer_ = 0;
+                    ROS_INFO("AVOID_TURN_RIGHT1 Phase");
+                }
+                break;
+            case FORWARD1:
+                cmd.linear.x = 0.0;
+                cmd.angular.z = 0.25;
+                if(phase_timer_ > 120) {
+                    avoid_phase_ = AVOID_TURN_LEFT1;
+                    phase_timer_ = 0;
+                    ROS_INFO("FORWARD1 Phase");
+                }
+                break;
+            case AVOID_TURN_LEFT1:
+                // 阶段3：左转90度回到原方向（约30帧 = 1秒）
+                cmd.linear.x = 0.2;
+                cmd.angular.z = 0.0;  // 左转
+                if(phase_timer_ > 140) {
+                    avoid_phase_ = FORWARD2;
+                    phase_timer_ = 0;
+                    ROS_INFO("AVOID_TURN_LEFT1 Phase");
+                }
+                break;
+            case FORWARD2:
+                cmd.linear.x = 0.0;
+                cmd.angular.z = -0.25;
+                if(phase_timer_ > 60) {
+                    current_state_ = STATE_LANE_FOLLOW;
+                    avoid_phase_ = AVOID_TURN_RIGHT_CORRECT;
+                    phase_timer_ = 0;
+                    ROS_INFO("FORWARD2 Phase");
+                }
+                break;
 
-        if (current_state_ == STATE_OBSTACLE_1_AVOID) {
-            // 第一个障碍：向左绕行
-            cmd.linear.x = 0.2;
-            cmd.angular.z = 0.5; // 左转
-        } else if (current_state_ == STATE_OBSTACLE_2_AVOID) {
-            // 第二个障碍：向右绕行
-            cmd.linear.x = 0.2;
-            cmd.angular.z = -0.5; // 右转
-        }
 
-        if (avoid_timer_ > AVOID_DURATION) {
-            // 绕行完成，回到循迹模式
-            current_state_ = STATE_LANE_FOLLOW;
-            avoid_timer_ = 0;
-            ROS_INFO("Avoidance complete, switching to Lane Follow.");
+
+            case AVOID_TURN_RIGHT_CORRECT:
+                // 阶段4：前进一段距离确保完全绕过（约40帧）
+                cmd.linear.x = 0.0;
+                cmd.angular.z = 0.25;
+                if(phase_timer_ > 70) {
+                    // 绕行完成，回到原状态
+                    avoid_phase_ = AVOID_TURN_LEFT2;
+                    phase_timer_ = 0;
+                    ROS_INFO("AVOID_CORRECT");
+                }
+                break;
+            case AVOID_TURN_LEFT2:
+                // 阶段4：前进一段距离确保完全绕过（约40帧）
+                cmd.linear.x = 0.2;
+                cmd.angular.z = 0.0;
+                if(phase_timer_ > 100) {
+                    // 绕行完成，回到原状态
+                    avoid_phase_ = AVOID_TURN_RIGHT2;
+                    ROS_INFO("AVOID_TURN_RIGHT2 Phase");
+                    phase_timer_ = 0;
+                }
+                break;
+            case AVOID_TURN_RIGHT2:
+                // 阶段4：前进一段距离确保完全绕过（约40帧）
+                cmd.linear.x = 0.0;
+                cmd.angular.z = -0.25;
+                if(phase_timer_ > 100) {
+                    // 绕行完成，回到原状态
+                    avoid_phase_ = AVOID_TURN_RIGHT3;
+                    ROS_INFO("Returning to LANE_FOLLOW State");
+                    phase_timer_ = 0;
+                }
+                break;
+            case AVOID_TURN_RIGHT3:
+                // 阶段4：前进一段距离确保完全绕过（约40帧）
+                cmd.linear.x = 0.15;
+                cmd.angular.z = -0.18;
+                if(phase_timer_ > 210) {
+                    // 绕行完成，回到原状态
+                    current_state_ = STATE_LANE_FOLLOW;
+                    avoid_phase_ = AVOID_TURN_RIGHT1;
+                    ROS_INFO("Returning to LANE_FOLLOW State");
+                    phase_timer_ = 0;
+                }
+                break;
         }
     }
 

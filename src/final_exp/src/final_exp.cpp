@@ -207,7 +207,7 @@ public:
         frame_width = img.cols;
         frame_height = img.rows;
         IMG_CENTER_X = frame_width / 2;
-        area_threshold = (frame_width * frame_height) / 10; 
+        area_threshold = (frame_width * frame_height) / 10.6; 
         TARGET_AREA = (frame_width * frame_height) / 10;
         ROS_INFO_ONCE("Image size: %dx%d", frame_width, frame_height);
         ROS_INFO_ONCE("Image center X: %d", IMG_CENTER_X);
@@ -237,7 +237,7 @@ public:
         double error = 0.0;  // 在函数开始处定义error
         double temp_threshold = area_threshold;
         if (obstacle_count_ == 1){
-            temp_threshold = area_threshold * 1.3;
+            temp_threshold = area_threshold * 1.2;
         }
         
         for (const auto& contour : contours) {
@@ -440,7 +440,7 @@ public:
             case LEFT1:
                 cmd.linear.x = 0.0;
                 cmd.angular.z = 0.25;
-                if(elapsed_ms > 4000) {  // 120帧@30fps ≈ 4000ms
+                if(elapsed_ms > 4200) {  // 120帧@30fps ≈ 4000ms
                     avoid_phase_ = FORWARD12;
                     phase_start_time_ = std::chrono::steady_clock::now();
                     ROS_INFO("LEFT1 Phase");
@@ -459,7 +459,7 @@ public:
             case RIGHTCORRECT1:
                 cmd.linear.x = 0.0;
                 cmd.angular.z = -0.25;
-                if(elapsed_ms > 2300) {  // 60帧@30fps ≈ 2000ms
+                if(elapsed_ms > 1600) {  // 60帧@30fps ≈ 2000ms
                     current_state_ = STATE_LANE_FOLLOW;
                     avoid_phase_ = LEFT2;
                     phase_start_time_ = std::chrono::steady_clock::now();

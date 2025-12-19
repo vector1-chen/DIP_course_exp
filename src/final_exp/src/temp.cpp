@@ -8,7 +8,6 @@
 #include <vector>
 #include <cmath>
 #include <limits>
-#include <chrono>
 
 using namespace cv;
 using namespace std;
@@ -26,6 +25,7 @@ enum State {
     STATE_LANE_FOLLOW,
     STATE_OBSTACLE_1_AVOID,  // 绿色路线：向左绕行第一个障碍
     STATE_OBSTACLE_2_AVOID,  // 绿色路线：向右绕行第二个障碍
+    STATE_SEARCH_TARGET,
     STATE_TRACK_TARGET
 };
 
@@ -49,8 +49,6 @@ private:
     int frame_width = 640;  // 假设图像宽度
     int frame_height = 480; // 假设图像高度
     int IMG_CENTER_X = 320;    // 假设图像宽度 640/2
-    double area_threshold = 85000.0; // 障碍物检测面积阈值
-
     
     // 橙色锥桶 HSV 范围 (默认值，需要校准)
     const Scalar cone_lower = Scalar(153, 45, 47); 
@@ -61,36 +59,17 @@ private:
     const Scalar target_upper = Scalar(180, 255, 255);
 
     // 控制参数
-    const double KP_LANE = 0.0028;   // 循迹比例控制系数
+    const double KP_LANE = 0.003;   // 循迹比例控制系数
     const double KI_LANE = 0.000;   // 循迹积分控制系数
     double integral_lane = 0.0; // 循迹积分误差
     const double KP_TRACK = 0.008;  // 跟踪比例控制系数
     const double KI_TRACK = 0.000;  // 跟踪积分控制系数
     double integral_track = 0.0; // 跟踪积分误差
     const double LINEAR_SPEED = 0.4; // 默认线速度 (m/s)
-    double TARGET_AREA = 60000.0;      // 期望的目标面积大小 (用于距离保持)
-
-    // 模板库
-    map<int, Mat> templates_;
-    bool templates_loaded_;
-
-    // 匹配参数
-    const Size TEMPLATE_SIZE = Size(80, 120); // 归一化尺寸 (宽, 高)
-    const double MATCH_THRESHOLD = 0.35;     // 匹配阈值 (0-1), 越接近1越严格
-
-    // PID 控制参数
-    const double KP_ANGULAR = 0.3;
-    const double KI_ANGULAR = 0.01;
-    double integral_angular = 0.0;
-    const double KP_LINEAR = 0.0003;
-    const double KI_LINEAR = 0.000000;
-    double integral_linear = 0.0;
-
 
 
 public:
-    RobotVisionController() : it_(nh_), current_state_(STATE_LANE_FOLLOW), lost_cones_counter_(0), avoid_timer_(0), obstacle_count_(0), avoid_phase_(RIGHT1),  templates_loaded_(false) {
-        phase_start_time_ = std::chrono::steady_clock::now();
+    RobotVisionController() : it_(nh_), current_state_(STATE_LANE_FOLLOW), lost_cones_counter_(0), avoid_timer_(0), obstacle_count_(0), avoid_phase_(RIGHT1), phase_timer_(0) {
         // 订阅摄像头话题 - 统一使用 ROS 话题订阅
         std::string camera_topic;
         
@@ -118,14 +97,6 @@ public:
 
         // 发布速度话题 cmd_vel
         vel_pub_ = nh_.advertise<geometry_msgs::Twist>("/cmd_vel", 10);
-
-        loadTemplate(0, "/home/haojiechen/file_mess/DIP/dip_ws/src/templates/template0.jpg");
-        loadTemplate(1, "/home/haojiechen/file_mess/DIP/dip_ws/src/templates/template1.jpg");
-        loadTemplate(2, "/home/haojiechen/file_mess/DIP/dip_ws/src/templates/template2.jpg");
-
-        cv::namedWindow("View");
-        cv::namedWindow("Threshold");
-
         
         ROS_INFO("Robot Vision Controller Initialized in LANE_FOLLOW mode.");
         cv::namedWindow("Debug Mask");
@@ -133,59 +104,19 @@ public:
 
     ~RobotVisionController() {
         cv::destroyWindow("Debug Mask");
-
-        cv::destroyWindow("View");
-        cv::destroyWindow("Threshold");
     }
-
-
-    // 加载模板函数
-    void loadTemplate(int id, string path) {  
-        Mat img = imread(path, IMREAD_GRAYSCALE);
-        if (img.empty()) {
-            ROS_ERROR("Failed to load template: %s", path.c_str());
-            return;
-        }
-        // 图像滤波去噪
-        GaussianBlur(img, img, Size(5, 5), 0);
-        // 二值化处理，保证模板是黑底白字（或者白底黑字，需统一）
-        // 这里假设输入图片是白纸黑字，我们统一转为黑底白字进行匹配
-        threshold(img, img, 100, 255, THRESH_BINARY_INV);
-        // 对1右移
-        if (id == 1){
-            Mat M = (Mat_<double>(2,3) << 1, 0, 100, 0, 1, 0);
-            warpAffine(img, img, M, img.size());
-        }
-        resize(img, img, TEMPLATE_SIZE);
-        templates_[id] = img;
-        templates_loaded_ = true;
-        imshow("Template " + to_string(id), img);
-    }
-
 
     void imageCb(const sensor_msgs::ImageConstPtr& msg) {
-        if (!templates_loaded_) return;
-
-
         cv_bridge::CvImageConstPtr cv_ptr;
-        try {
-            cv_ptr = cv_bridge::toCvCopy(msg, sensor_msgs::image_encodings::BGR8);
-        } catch (cv_bridge::Exception& e) {
-            ROS_ERROR("cv_bridge exception: %s", e.what());
-            return;
-        }
-
+        cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::BGR8);
         processImage(cv_ptr->image);
-
-        ROS_INFO_ONCE("Received image %dx%d", cv_ptr->image.cols, cv_ptr->image.rows);
-
     }
 
     void updateMask() {
         inRange(hsv, cone_lower, cone_upper, mask);
         
         // 形态学操作：开运算去噪
-        Mat kernel = getStructuringElement(MORPH_RECT, Size(80, 80));
+        Mat kernel = getStructuringElement(MORPH_RECT, Size(95, 95));
         morphologyEx(mask, mask, MORPH_OPEN, kernel);
         // 形态学操作：闭运算连接锥桶区域
         // kernel = getStructuringElement(MORPH_RECT, Size(60, 60));
@@ -200,17 +131,14 @@ public:
         
         // 预处理：高斯模糊去噪，转换HSV
         GaussianBlur(img, img, Size(5, 5), 0);
-        if (current_state_ == STATE_TRACK_TARGET){
-            GaussianBlur(img, img, Size(7, 7), 0);
-        }
         cvtColor(img, hsv, COLOR_BGR2HSV);
+        updateMask();
         frame_width = img.cols;
         frame_height = img.rows;
         IMG_CENTER_X = frame_width / 2;
-        area_threshold = (frame_width * frame_height) / 10; 
-        TARGET_AREA = (frame_width * frame_height) / 10;
         ROS_INFO_ONCE("Image size: %dx%d", frame_width, frame_height);
         ROS_INFO_ONCE("Image center X: %d", IMG_CENTER_X);
+        cv::imshow("Debug Mask", mask);
 
 
         // 状态
@@ -224,10 +152,15 @@ public:
                 handleObstacleAvoidance(cmd);
                 break;
             
+            case STATE_SEARCH_TARGET:
+                handleTargetSearch(cmd);
+                break;
+
             case STATE_TRACK_TARGET:
-                processAndTrack(img, cmd);
+                handleTargetTracking(cmd);
                 break;
         }
+
         vel_pub_.publish(cmd);
         waitKey(3);
     }
@@ -235,16 +168,12 @@ public:
     bool controlOne(geometry_msgs::Twist &cmd, double speed, bool &obstacle_detected){
         double cx_center = INFINITY;
         double error = 0.0;  // 在函数开始处定义error
-        double temp_threshold = area_threshold;
-        if (obstacle_count_ == 1){
-            temp_threshold = area_threshold * 1.3;
-        }
         
         for (const auto& contour : contours) {
             Moments M = moments(contour);
             if (M.m00 > 0) {
                 double cx = M.m10 / M.m00;
-                if (cx < frame_width / 4 || cx > frame_width * 3 / 4) continue; // 忽略边缘轮廓{
+                if (cx < frame_width / 5 || cx > frame_width * 4 / 5) continue; // 忽略边缘轮廓{
                 if (std::abs(cx - IMG_CENTER_X) < std::abs(cx_center - IMG_CENTER_X)){
                     cx_center = cx;
                 }
@@ -254,7 +183,7 @@ public:
                 if (area < 3500) continue; // 忽略过小轮廓噪声
 
                 // **障碍物检测启发式：** 面积巨大且靠近图像中心
-                if (area > temp_threshold && cx > IMG_CENTER_X - IMG_CENTER_X /5 && cx < IMG_CENTER_X + IMG_CENTER_X /5) { // 阈值需调试
+                if (area > 85000 && cx > IMG_CENTER_X - IMG_CENTER_X /5 && cx < IMG_CENTER_X + IMG_CENTER_X /5) { // 阈值需调试
                     area_count++;
                     if (area_count > 5)
                     {
@@ -287,10 +216,6 @@ public:
     bool controlAll(geometry_msgs::Twist &cmd, double speed, bool &obstacle_detected){
         double sum_x_ = 0.0;
         int contour_count = 0;
-        double temp_KP_LANE = KP_LANE;
-        if (obstacle_count_ == 2){
-            temp_KP_LANE = KP_LANE * 1.2;
-        }
 
         for (const auto& contour : contours) {
             Moments M = moments(contour);
@@ -301,7 +226,7 @@ public:
                 if (area < 3500) continue; // 忽略过小轮廓噪声
 
                 // **障碍物检测启发式：** 面积巨大且靠近图像中心
-                if (area > area_threshold && cx > IMG_CENTER_X - IMG_CENTER_X /5 && cx < IMG_CENTER_X + IMG_CENTER_X /5) { // 阈值需调试
+                if (area > 85000 && cx > IMG_CENTER_X - IMG_CENTER_X /5 && cx < IMG_CENTER_X + IMG_CENTER_X /5) { // 阈值需调试
                     area_count++;
                     if (area_count > 5)
                     {
@@ -335,7 +260,7 @@ public:
             cmd.linear.x = speed;
         }
         else{
-            cmd.angular.z = temp_KP_LANE * error + KI_LANE * integral_lane;
+            cmd.angular.z = KP_LANE * error + KI_LANE * integral_lane;
             cmd.linear.x = speed;
         }
         return abs(error) < 50;
@@ -346,26 +271,23 @@ public:
      */
     void handleLaneFollow(geometry_msgs::Twist &cmd) {
 
-        updateMask();
         // 寻找轮廓
         findContours(mask, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
 
-        if (contours.empty()) {
-            lost_cones_counter_++;
-            if (lost_cones_counter_ > 90) { // 连续丢失超过50帧，切换到寻找模式
-                current_state_ = STATE_TRACK_TARGET;
-                ROS_INFO("Cones lost, switching to Target Search Mode.");
-                cmd.angular.z = 0.0;
-                cmd.linear.x = 0.0;
-            }
-            cmd.linear.x = 0.0;
-            return;
-        } else {
-            lost_cones_counter_ = 0;
-        }
+        // if (contours.empty()) {
+        //     lost_cones_counter_++;
+        //     if (lost_cones_counter_ > 50) { // 连续丢失超过50帧，切换到寻找模式
+        //         current_state_ = STATE_SEARCH_TARGET;
+        //         ROS_INFO("Cones lost, switching to Target Search Mode.");
+        //     }
+        //     cmd.linear.x = 0.0;
+        //     return;
+        // } else {
+        //     lost_cones_counter_ = 0;
+        // }
         bool obstacle_detected = false;
         if (obstacle_count_ >= 2){
-            controlAll(cmd, LINEAR_SPEED*1.3, obstacle_detected);
+            controlAll(cmd, LINEAR_SPEED, obstacle_detected);
         }
         else 
         {
@@ -379,7 +301,6 @@ public:
 
             obstacle_count_++;
             avoid_timer_ = 0; // 重置计时器
-            phase_start_time_ = std::chrono::steady_clock::now(); // 重置时间计时器
             if (obstacle_count_ == 1) {
                 current_state_ = STATE_OBSTACLE_1_AVOID;
                 ROS_INFO("Obstacle 1 detected! Avoiding Left (Green Route).");
@@ -391,7 +312,6 @@ public:
             }
             // 超过两个障碍，忽略
         }
-        cv::imshow("Debug Mask", mask);
         
     }
     
@@ -411,235 +331,193 @@ public:
     };
 
     AvoidPhase avoid_phase_;
-    std::chrono::steady_clock::time_point phase_start_time_;  // 每个阶段的开始时间
+    int phase_timer_;  // 每个阶段的计时器
 
     void handleObstacleAvoidance(geometry_msgs::Twist &cmd) {
-        auto current_time = std::chrono::steady_clock::now();
-        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(current_time - phase_start_time_).count();
+        phase_timer_++;
         
         switch(avoid_phase_) {
             case RIGHT1:
                 cmd.linear.x = 0.0;
                 cmd.angular.z = -0.25;
-                if(elapsed_ms > 2500) {  // 70帧@30fps ≈ 2333ms
+                if(phase_timer_ > 70) {
                     avoid_phase_ = FORWARD11;
-                    phase_start_time_ = std::chrono::steady_clock::now();
+                    phase_timer_ = 0;
                     ROS_INFO("RIGHT1 Phase");
                 }
                 break;
             case FORWARD11:
-                // 阶段1：右转90度
+                // 阶段1：右转90度（约30帧 @ 30fps = 1秒）
                 cmd.linear.x = 0.2;
-                cmd.angular.z = 0.0;
-                if(elapsed_ms > 3500) {  // 100帧@30fps ≈ 3333ms
+                cmd.angular.z = 0.0;  // 右转
+                if(phase_timer_ > 100) {
                     avoid_phase_ = LEFT1;
-                    phase_start_time_ = std::chrono::steady_clock::now();
+                    phase_timer_ = 0;
                     ROS_INFO("FORWARD1 Phase");
                 }
                 break;
             case LEFT1:
                 cmd.linear.x = 0.0;
                 cmd.angular.z = 0.25;
-                if(elapsed_ms > 4000) {  // 120帧@30fps ≈ 4000ms
+                if(phase_timer_ > 120) {
                     avoid_phase_ = FORWARD12;
-                    phase_start_time_ = std::chrono::steady_clock::now();
+                    phase_timer_ = 0;
                     ROS_INFO("LEFT1 Phase");
                 }
                 break;
             case FORWARD12:
-                // 阶段3：左转90度回到原方向
+                // 阶段3：左转90度回到原方向（约30帧 = 1秒）
                 cmd.linear.x = 0.2;
-                cmd.angular.z = 0.0;
-                if(elapsed_ms > 4000) {  // 140帧@30fps ≈ 4667ms
+                cmd.angular.z = 0.0;  // 左转
+                if(phase_timer_ > 140) {
                     avoid_phase_ = RIGHTCORRECT1;
-                    phase_start_time_ = std::chrono::steady_clock::now();
+                    phase_timer_ = 0;
                     ROS_INFO("FORWARD2 Phase");
                 }
                 break;
             case RIGHTCORRECT1:
                 cmd.linear.x = 0.0;
                 cmd.angular.z = -0.25;
-                if(elapsed_ms > 2300) {  // 60帧@30fps ≈ 2000ms
+                if(phase_timer_ > 60) {
                     current_state_ = STATE_LANE_FOLLOW;
                     avoid_phase_ = LEFT2;
-                    phase_start_time_ = std::chrono::steady_clock::now();
+                    phase_timer_ = 0;
                     ROS_INFO("RIGHTCORRECT1 Phase");
-                // if (obstacle_count_ ==1)
-                // {
-                //     bool null = false;
-                //     ROS_INFO_ONCE("Completing avoiding Obstacle 1 .");
-                //     while(!controlOne(cmd, 0, null));
-                //     ROS_INFO_ONCE("Debug");
-                // }
-                 }
+                if (obstacle_count_ ==1)
+                {
+                    bool null = false;
+                    ROS_INFO_ONCE("Completing avoiding Obstacle 1 .");
+                    while(!controlOne(cmd, 0, null));
+                }
+                }
                 break;
 
 
 
             case LEFT2:
-                // 阶段4：前进一段距离确保完全绕过
+                // 阶段4：前进一段距离确保完全绕过（约40帧）
                 cmd.linear.x = 0.0;
                 cmd.angular.z = 0.25;
-                if(elapsed_ms > 2500) {  // 70帧@30fps ≈ 2333ms
+                if(phase_timer_ > 70) {
                     // 绕行完成，回到原状态
                     avoid_phase_ = FORWARD21;
-                    phase_start_time_ = std::chrono::steady_clock::now();
+                    phase_timer_ = 0;
                     ROS_INFO("LEFT2 Phase");
                 }
                 break;
             case FORWARD21:
-                // 阶段4：前进一段距离确保完全绕过
+                // 阶段4：前进一段距离确保完全绕过（约40帧）
                 cmd.linear.x = 0.2;
                 cmd.angular.z = 0.0;
-                if(elapsed_ms > 3333) {  // 100帧@30fps ≈ 3333ms
+                if(phase_timer_ > 100) {
                     // 绕行完成，回到原状态
                     avoid_phase_ = RIGHT2;
                     ROS_INFO("FORWARD21 Phase");
-                    phase_start_time_ = std::chrono::steady_clock::now();
+                    phase_timer_ = 0;
                 }
                 break;
             case RIGHT2:
-                // 阶段4：前进一段距离确保完全绕过
+                // 阶段4：前进一段距离确保完全绕过（约40帧）
                 cmd.linear.x = 0.0;
                 cmd.angular.z = -0.25;
-                if(elapsed_ms > 3333) {  // 100帧@30fps ≈ 3333ms
+                if(phase_timer_ > 100) {
                     // 绕行完成，回到原状态
                     avoid_phase_ = RIGHTCORRECT2;
                     ROS_INFO("RIGHT2 Phase");
-                    phase_start_time_ = std::chrono::steady_clock::now();
+                    phase_timer_ = 0;
                 }
                 break;
             case RIGHTCORRECT2:
-                // 阶段4：前进一段距离确保完全绕过
+                // 阶段4：前进一段距离确保完全绕过（约40帧）
                 cmd.linear.x = 0.15;
-                cmd.angular.z = -0.22;
-                if(elapsed_ms > 7000) {  // 210帧@30fps ≈ 7000ms
+                cmd.angular.z = -0.18;
+                if(phase_timer_ > 210) {
                     // 绕行完成，回到原状态
                     current_state_ = STATE_LANE_FOLLOW;
                     avoid_phase_ = RIGHT1;
                     ROS_INFO("RIGHTCORRECT2 Phase - Obstacle Avoidance Complete.");
-                    phase_start_time_ = std::chrono::steady_clock::now();
-                // if (obstacle_count_ ==2)
-                // {
-                //     bool null = false;
-                //     ROS_INFO_ONCE("Completing avoiding Obstacle 2 ");
-                //     while(!controlAll(cmd, 0, null));
-                //     ROS_INFO_ONCE("Debug");
-                // }
+                    phase_timer_ = 0;
+                if (obstacle_count_ ==2)
+                {
+                    bool null = false;
+                    ROS_INFO_ONCE("Completing avoiding Obstacle 2 ");
+                    while(!controlAll(cmd, 0, null));
+                    ROS_INFO_ONCE("Debug");
+                }
                 }
                 break;
             }
         }
 
-
-    
-
-    void processAndTrack(Mat frame, geometry_msgs::Twist &cmd) {
-        Mat gray, binary;
-
-        // 1. 预处理
-        cvtColor(frame, gray, COLOR_BGR2GRAY);
+    /**
+     * 寻找目标模式：原地旋转寻找红色数字纸张
+     */
+    void handleTargetSearch(geometry_msgs::Twist &cmd) {
+        Mat mask_target;
+        inRange(hsv, target_lower, target_upper, mask_target);
         
-        // 自适应阈值处理，应对光照变化
-        // blockSize: 11, C: 2. 结果：黑色物体变白，白色背景变黑 (THRESH_BINARY_INV)
-        adaptiveThreshold(gray, binary, 255, ADAPTIVE_THRESH_GAUSSIAN_C, THRESH_BINARY_INV, 25, 10);
+        if (countNonZero(mask_target) > 1000) { // 检测到红色色块
+            current_state_ = STATE_TRACK_TARGET;
+            ROS_INFO("Target found, switching to Tracking Mode.");
+            return;
+        }
 
-        // 形态学操作：开运算去除噪点，闭运算连接数字
-        Mat kernel = getStructuringElement(MORPH_RECT, Size(3, 3));
-        morphologyEx(binary, binary, MORPH_OPEN, kernel);
-        kernel = getStructuringElement(MORPH_RECT, Size(3, 3));
-        morphologyEx(binary, binary, MORPH_CLOSE, kernel);
+        // 未找到：原地旋转
+        cmd.linear.x = 0.0;
+        cmd.angular.z = 0.4;
+        
+        cv::imshow("Debug Mask", mask_target);
+    }
+    
+    /**
+     * 目标跟踪模式：跟踪红色数字纸张的重心
+     */
+    void handleTargetTracking(geometry_msgs::Twist &cmd) {
+        inRange(hsv, target_lower, target_upper, mask);
+        
+        // 形态学操作：闭运算连接数字区域
+        Mat kernel = getStructuringElement(MORPH_RECT, Size(7, 7));
+        morphologyEx(mask, mask, MORPH_CLOSE, kernel);
 
-        imshow("Threshold", binary); // 调试显示二值化图
-
-        // 2. 查找轮廓
         vector<vector<Point>> contours;
-        findContours(binary, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
-
-        int best_digit = -1;
-        double max_score = -1.0;
-        Rect best_rect;
-
-        for (const auto& cnt : contours) {
-            Rect roi_rect = boundingRect(cnt);
-            double area = contourArea(cnt);
-
-            // 3. 筛选候选区域 (根据面积和长宽比)
-            // 假设：数字是垂直长方形，面积适中
-            double aspect_ratio = (double)roi_rect.width / roi_rect.height;
-            
-            if (area > 10000 && area < (frame.rows * frame.cols) && aspect_ratio < 1 && aspect_ratio > 0.15) {
-                // 扩展 ROI 范围，避免裁剪数字边缘
-                int padding_w = roi_rect.width * 0.15;
-                int padding_h = roi_rect.height * 0.15;
-                
-                // 计算扩展后的边界并限制在图像范围内
-                int x1 = max(roi_rect.x - padding_w, 0);
-                int y1 = max(roi_rect.y - padding_h, 0);
-                int x2 = min(roi_rect.x + roi_rect.width + padding_w, binary.cols);
-                int y2 = min(roi_rect.y + roi_rect.height + padding_h, binary.rows);
-                Rect expanded_rect(x1, y1, x2 - x1, y2 - y1);
-                // 提取 ROI 并预处理（与模板一致）
-                Mat roi = binary(expanded_rect).clone();
-                // 闭运算连接数字笔画
-                Mat kernel_roi = getStructuringElement(MORPH_RECT, Size(50, 50));
-                morphologyEx(roi, roi, MORPH_CLOSE, kernel_roi);
-                imshow("ROI Before Resize", roi);
-                resize(roi, roi, TEMPLATE_SIZE);
-
-                // 4. 模板匹配
-                for (auto const& pair : templates_) {
-                    int id = pair.first;
-                    const Mat& temp_img = pair.second;
-                    Mat result;
-                    matchTemplate(roi, temp_img, result, TM_CCOEFF_NORMED);
-                    
-                    double minVal, maxVal;
-                    minMaxLoc(result, &minVal, &maxVal);
-
-                    // 如果得分高于阈值且是目前最高的
-                    if (maxVal > MATCH_THRESHOLD && maxVal > max_score) {
-                        max_score = maxVal;
-                        best_digit = id;
-                        best_rect = roi_rect;
-                    }
-                }
+        findContours(mask, contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+        
+        double max_area = 0;
+        int max_idx = -1;
+        
+        // 找到最大的红色目标轮廓
+        for(int i=0; i<contours.size(); i++){
+            double area = contourArea(contours[i]);
+            if(area > max_area){
+                max_area = area;
+                max_idx = i;
             }
         }
 
-        // 5. 跟踪控制逻辑
-        if (best_digit != -1) {
-            // 画框显示
-            rectangle(frame, best_rect, Scalar(0, 255, 0), 2);
-            putText(frame, to_string(best_digit), Point(best_rect.x, best_rect.y - 10), 
-                    FONT_HERSHEY_SIMPLEX, 1.0, Scalar(0, 0, 255), 2);
+        if(max_idx != -1 && max_area > 1000) {
+            Moments M = moments(contours[max_idx]);
+            double cx = M.m10 / M.m00;
             
-            // 计算中心偏差
-            double center_x = best_rect.x + best_rect.width / 2.0;
-            double error_x = IMG_CENTER_X - center_x; // 假设图像宽720
-            integral_angular += error_x;
-            if (integral_angular > 100000) integral_angular = 100000;
-            if (integral_angular < -100000) integral_angular = -100000;
+            // 跟踪控制：调整角度以使目标居中
+            double error = IMG_CENTER_X - cx;
+            cmd.angular.z = KP_TRACK * error;
             
-            // 计算面积偏差 (用于前后运动)
-            double area = best_rect.width * best_rect.height;
-            double error_area = TARGET_AREA - area;
-            integral_linear += error_area;
-            if (integral_linear > 1000000) integral_linear = 1000000;
-            if (integral_linear < -1000000) integral_linear = -1000000;
-
-            // PID 控制
-            cmd.angular.z = KP_ANGULAR * error_x + KI_ANGULAR * integral_angular;
-            cmd.linear.x = KP_LINEAR * error_area + KI_LINEAR * integral_linear;
-            
-            ROS_INFO("Detect: %d | Score: %.2f | Area: %.0f", best_digit, max_score, area);
-
+            // 距离控制：根据面积调整线速度 (防止碰撞)
+            if (max_area > 80000) { // 目标太近
+                cmd.linear.x = 0.0;
+            } else if (max_area < 10000) { // 目标太远
+                cmd.linear.x = 0.25;
+            } else { // 保持距离
+                cmd.linear.x = 0.15;
+            }
+        } else {
+            // 丢失目标，回到搜索模式
+            current_state_ = STATE_SEARCH_TARGET;
         }
-        imshow("View", frame);
+        
+        cv::imshow("Debug Mask", mask); 
     }
 };
-
-
 
 int main(int argc, char** argv) {
     ros::init(argc, argv, "course_design_node");

@@ -46,9 +46,9 @@ private:
     vector<vector<Point>> contours;
     Mat hsv;
 
-    int frame_width = 640;  // 假设图像宽度
-    int frame_height = 480; // 假设图像高度
-    int IMG_CENTER_X = 320;    // 假设图像宽度 640/2
+    int frame_width = 1280;  // 假设图像宽度
+    int frame_height = 720; // 假设图像高度
+    int IMG_CENTER_X = 640;    // 假设图像宽度 1280/2
     double area_threshold = 85000.0; // 障碍物检测面积阈值
 
     
@@ -185,14 +185,29 @@ public:
     void updateMask() {
         inRange(hsv, cone_lower, cone_upper, mask);
         
+        // 形态学核大小（只在第一次调用时计算）
+        static bool kernel_initialized = false;
+        static int open_kernel_w = 80;
+        static int open_kernel_h = 80;
+        static int dilate_kernel_w = 7;
+        static int dilate_kernel_h = 250;
+        
+        if (!kernel_initialized) {
+            open_kernel_w = max(1, (int)(frame_width * 0.0625));    // 约6.25%宽度，原值80@1280
+            open_kernel_h = max(1, (int)(frame_height * 0.111));    // 约11.1%高度，原值80@720
+            dilate_kernel_w = max(1, (int)(frame_width * 0.0055));  // 约0.55%宽度，原值7@1280
+            dilate_kernel_h = max(1, (int)(frame_height * 0.347));  // 约34.7%高度，原值250@720
+            kernel_initialized = true;
+        }
+        
         // 形态学操作：开运算去噪
-        Mat kernel = getStructuringElement(MORPH_RECT, Size(80, 80));
+        Mat kernel = getStructuringElement(MORPH_RECT, Size(open_kernel_w, open_kernel_h));
         morphologyEx(mask, mask, MORPH_OPEN, kernel);
         // 形态学操作：闭运算连接锥桶区域
         // kernel = getStructuringElement(MORPH_RECT, Size(60, 60));
         // morphologyEx(mask, mask, MORPH_CLOSE, kernel);
         // 形态学操作：长方形膨胀增强锥桶区域
-        kernel = getStructuringElement(MORPH_RECT, Size(7, 250));
+        kernel = getStructuringElement(MORPH_RECT, Size(dilate_kernel_w, dilate_kernel_h));
         morphologyEx(mask, mask, MORPH_DILATE, kernel);
     }
 
@@ -205,13 +220,18 @@ public:
             GaussianBlur(img, img, Size(7, 7), 0);
         }
         cvtColor(img, hsv, COLOR_BGR2HSV);
-        frame_width = img.cols;
-        frame_height = img.rows;
-        IMG_CENTER_X = frame_width / 2;
-        area_threshold = (frame_width * frame_height) / 10.6; 
-        TARGET_AREA = (frame_width * frame_height) / 11.0;
-        ROS_INFO_ONCE("Image size: %dx%d", frame_width, frame_height);
-        ROS_INFO_ONCE("Image center X: %d", IMG_CENTER_X);
+        
+        // 图像参数（只在第一帧时计算）
+        static bool params_initialized = false;
+        if (!params_initialized) {
+            frame_width = img.cols;
+            frame_height = img.rows;
+            IMG_CENTER_X = frame_width / 2;
+            area_threshold = (frame_width * frame_height) / 10.6;  // 约9.4%图像面积，用于障碍物检测
+            TARGET_AREA = (frame_width * frame_height) / 11.0;     // 约9.1%图像面积，用于目标跟踪距离保持
+            params_initialized = true;
+            ROS_INFO("Image parameters initialized: %dx%d, center=%d", frame_width, frame_height, IMG_CENTER_X);
+        }
 
 
         // 状态
@@ -234,6 +254,17 @@ public:
     }
 
     bool controlOne(geometry_msgs::Twist &cmd, double speed, bool &obstacle_detected){
+        // 阈值（只在第一次调用时计算）
+        static bool thresholds_initialized = false;
+        static double min_contour_area = 3500.0;
+        static double error_threshold = 50.0;
+        
+        if (!thresholds_initialized) {
+            min_contour_area = (frame_width * frame_height) / 263.0; // 约0.38%图像面积，原值3500@1280x720
+            error_threshold = frame_width * 0.039;                    // 约7.8%半宽，原值50@1280
+            thresholds_initialized = true;
+        }
+        
         double cx_center = INFINITY;
         double error = 0.0;  // 在函数开始处定义error
         double temp_threshold = area_threshold;
@@ -252,7 +283,7 @@ public:
             
                 double area = contourArea(contour);
 
-                if (area < 3500) continue; // 忽略过小轮廓噪声
+                if (area < min_contour_area) continue; // 忽略过小轮廓噪声
 
                 // **障碍物检测启发式：** 面积巨大且靠近图像中心
                 if (area > temp_threshold && cx > IMG_CENTER_X - IMG_CENTER_X /5 && cx < IMG_CENTER_X + IMG_CENTER_X /5) { // 阈值需调试
@@ -283,25 +314,35 @@ public:
             cmd.angular.z = KP_LANE * error + KI_LANE * integral_lane;
             cmd.linear.x = speed;
         }
-        return std::abs(error) < 50;
+        return std::abs(error) < error_threshold;
     }
     bool controlAll(geometry_msgs::Twist &cmd, double speed, bool &obstacle_detected){
+        // 阈值（只在第一次调用时计算）
+        static bool thresholds_initialized = false;
+        static double min_contour_area = 3500.0;
+        static double error_threshold = 50.0;
+        
+        if (!thresholds_initialized) {
+            min_contour_area = (frame_width * frame_height) / 263.0; // 约0.38%图像面积，原值3500@1280x720
+            error_threshold = frame_width * 0.039;                    // 约7.8%半宽，原值50@1280
+            thresholds_initialized = true;
+        }
+        
         double sum_x_ = 0.0;
         int contour_count = 0;
         double temp_KP_LANE = KP_LANE;
         if (obstacle_count_ == 2){
             temp_KP_LANE = KP_LANE * 1.2;
         }
-
+        
         for (const auto& contour : contours) {
             Moments M = moments(contour);
             if (M.m00 > 0) {
                 double cx = M.m10 / M.m00;
                 double cy = M.m01 / M.m00;
                 double area = contourArea(contour);
-                if (area < 100) continue; // 忽略过小轮廓
 
-                if (area < 3500) continue; // 忽略过小轮廓噪声
+                if (area < min_contour_area) continue; // 忽略过小轮廓噪声
 
                 // **障碍物检测启发式：** 面积巨大且靠近图像中心
                 if (area > area_threshold && cx > IMG_CENTER_X - IMG_CENTER_X /5 && cx < IMG_CENTER_X + IMG_CENTER_X /5) { // 阈值需调试
@@ -341,7 +382,7 @@ public:
             cmd.angular.z = temp_KP_LANE * error + KI_LANE * integral_lane;
             cmd.linear.x = speed;
         }
-        return abs(error) < 50;
+        return abs(error) < error_threshold;
     }
 
     /**

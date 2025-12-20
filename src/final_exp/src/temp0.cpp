@@ -29,17 +29,13 @@ private:
     bool templates_loaded_;
 
     // 匹配参数
-    const Size TEMPLATE_SIZE = Size(80, 120); // 归一化尺寸 (宽, 高)
-    const double MATCH_THRESHOLD = 0.3;     // 匹配阈值 (0-1), 越接近1越严格
+    const Size TEMPLATE_SIZE = Size(50, 80); // 归一化尺寸 (宽, 高)
+    const double MATCH_THRESHOLD = 0.65;     // 匹配阈值 (0-1), 越接近1越严格
 
     // PID 控制参数
-    const double KP_ANGULAR = 0.02;
-    const double KI_ANGULAR = 0.0004;
-    double integral_angular = 0.0;
-    const double TARGET_AREA = 50000.0;      // 期望的目标面积大小 (用于距离保持)
-    const double KP_LINEAR = 0.00002;
-    const double KI_LINEAR = 0.0000002;
-    double integral_linear = 0.0;
+    const double KP_ANGULAR = 0.005;
+    const double TARGET_AREA = 20000.0;      // 期望的目标面积大小 (用于距离保持)
+    const double KP_LINEAR = 0.00001;
 
 public:
     DigitTracker() : it_(nh_), templates_loaded_(false) {
@@ -61,26 +57,19 @@ public:
     }
 
     // 加载模板函数
-    void loadTemplate(int id, string path) {  
+    void loadTemplate(int id, string path) {
         Mat img = imread(path, IMREAD_GRAYSCALE);
         if (img.empty()) {
             ROS_ERROR("Failed to load template: %s", path.c_str());
             return;
         }
-        // 图像滤波去噪
-        GaussianBlur(img, img, Size(5, 5), 0);
         // 二值化处理，保证模板是黑底白字（或者白底黑字，需统一）
         // 这里假设输入图片是白纸黑字，我们统一转为黑底白字进行匹配
         threshold(img, img, 100, 255, THRESH_BINARY_INV);
-        //对1右移
-        if (id == 1){
-            Mat M = (Mat_<double>(2,3) << 1, 0, 200, 0, 1, 0);
-            warpAffine(img, img, M, img.size());
-        }
         resize(img, img, TEMPLATE_SIZE);
         templates_[id] = img;
         templates_loaded_ = true;
-        ROS_INFO("Loaded Template %d", id);        imshow("Template " + to_string(id), img);
+        ROS_INFO("Loaded Template %d", id);
     }
 
     void imageCb(const sensor_msgs::ImageConstPtr& msg) {
@@ -94,7 +83,6 @@ public:
             return;
         }
 
-        ROS_INFO_ONCE("Received image %dx%d", cv_ptr->image.cols, cv_ptr->image.rows);
         processAndTrack(cv_ptr->image);
     }
 
@@ -108,12 +96,10 @@ public:
         // 自适应阈值处理，应对光照变化
         // blockSize: 11, C: 2. 结果：黑色物体变白，白色背景变黑 (THRESH_BINARY_INV)
         adaptiveThreshold(gray, binary, 255, ADAPTIVE_THRESH_GAUSSIAN_C, THRESH_BINARY_INV, 25, 10);
-        imshow("Threshold Raw", binary);
 
         // 形态学操作：开运算去除噪点，闭运算连接数字
         Mat kernel = getStructuringElement(MORPH_RECT, Size(3, 3));
         morphologyEx(binary, binary, MORPH_OPEN, kernel);
-        kernel = getStructuringElement(MORPH_RECT, Size(3, 3));
         morphologyEx(binary, binary, MORPH_CLOSE, kernel);
 
         imshow("Threshold", binary); // 调试显示二值化图
@@ -134,29 +120,13 @@ public:
             // 假设：数字是垂直长方形，面积适中
             double aspect_ratio = (double)roi_rect.width / roi_rect.height;
             
-            if (area > 10000 && area < 100000 && aspect_ratio < 0.9 && aspect_ratio > 0.2) {
-                // 扩展 ROI 范围，避免裁剪数字边缘
-                int padding_w = roi_rect.width * 0.15;
-                int padding_h = roi_rect.height * 0.15;
-                
-                // 计算扩展后的边界并限制在图像范围内
-                int x1 = max(roi_rect.x - padding_w, 0);
-                int y1 = max(roi_rect.y - padding_h, 0);
-                int x2 = min(roi_rect.x + roi_rect.width + padding_w, binary.cols);
-                int y2 = min(roi_rect.y + roi_rect.height + padding_h, binary.rows);
-                Rect expanded_rect(x1, y1, x2 - x1, y2 - y1);
-                // 提取 ROI 并预处理（与模板一致）
-                Mat roi = binary(expanded_rect).clone();
-                // 闭运算连接数字笔画
-                Mat kernel_roi = getStructuringElement(MORPH_RECT, Size(50, 50));
-                morphologyEx(roi, roi, MORPH_CLOSE, kernel_roi);
-                imshow("ROI Before Resize", roi);
+            if (area > 1000 && area < 50000 && aspect_ratio < 0.9 && aspect_ratio > 0.2) {
+                // 提取 ROI 并归一化
+                Mat roi = binary(roi_rect);
                 resize(roi, roi, TEMPLATE_SIZE);
 
                 // 4. 模板匹配
-                for (auto const& pair : templates_) {
-                    int id = pair.first;
-                    const Mat& temp_img = pair.second;
+                for (auto const& [id, temp_img] : templates_) {
                     Mat result;
                     matchTemplate(roi, temp_img, result, TM_CCOEFF_NORMED);
                     
@@ -182,25 +152,28 @@ public:
             
             // 计算中心偏差
             double center_x = best_rect.x + best_rect.width / 2.0;
-            double error_x = 640 - center_x; // 假设图像宽720
-            integral_angular += error_x;
-            if (integral_angular > 10000) integral_angular = 10000;
-            if (integral_angular < -10000) integral_angular = -10000;
+            double error_x = 320 - center_x; // 假设图像宽640
             
             // 计算面积偏差 (用于前后运动)
             double area = best_rect.width * best_rect.height;
             double error_area = TARGET_AREA - area;
-            integral_linear += error_area;
-            if (integral_linear > 1000000) integral_linear = 1000000;
-            if (integral_linear < -1000000) integral_linear = -1000000;
 
             // PID 控制
-            cmd.angular.z = KP_ANGULAR * error_x + KI_ANGULAR * integral_angular;
-            cmd.linear.x = KP_LINEAR * error_area + KI_LINEAR * integral_linear;
+            cmd.angular.z = KP_ANGULAR * error_x;
+
+            if (abs(error_x) < 50) { // 只有当大致对准时才前后移动
+                if (area > TARGET_AREA * 1.2) cmd.linear.x = -0.1; // 太近，后退
+                else if (area < TARGET_AREA * 0.8) cmd.linear.x = 0.15; // 太远，前进
+                else cmd.linear.x = 0.0; // 距离合适
+            }
             
             ROS_INFO("Detect: %d | Score: %.2f | Area: %.0f", best_digit, max_score, area);
 
-        } 
+        } else {
+            // 没找到目标，停止或原地搜索
+            cmd.linear.x = 0.0;
+            cmd.angular.z = 0.0; 
+        }
 
         vel_pub_.publish(cmd);
         imshow("View", frame);

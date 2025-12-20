@@ -17,7 +17,7 @@ enum CameraState
     ZED,
     REALSENSE
 };
-CameraState state = COMPUTER;
+CameraState state = REALSENSE;  // 修改为使用电脑摄像头
 
 
 using namespace cv;

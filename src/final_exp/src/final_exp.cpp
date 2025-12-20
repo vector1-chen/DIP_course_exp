@@ -61,7 +61,7 @@ private:
     const Scalar target_upper = Scalar(180, 255, 255);
 
     // 控制参数
-    const double KP_LANE = 0.0028;   // 循迹比例控制系数
+    const double KP_LANE = 0.003;   // 循迹比例控制系数
     const double KI_LANE = 0.000;   // 循迹积分控制系数
     double integral_lane = 0.0; // 循迹积分误差
     const double KP_TRACK = 0.008;  // 跟踪比例控制系数
@@ -76,14 +76,16 @@ private:
 
     // 匹配参数
     const Size TEMPLATE_SIZE = Size(80, 120); // 归一化尺寸 (宽, 高)
-    const double MATCH_THRESHOLD = 0.35;     // 匹配阈值 (0-1), 越接近1越严格
+    const double MATCH_THRESHOLD = 0.4;     // 匹配阈值 (0-1), 越接近1越严格
 
     // PID 控制参数
-    const double KP_ANGULAR = 0.3;
+    const double KP_ANGULAR = 3.5;
     const double KI_ANGULAR = 0.01;
     double integral_angular = 0.0;
-    const double KP_LINEAR = 0.0003;
-    const double KI_LINEAR = 0.000000;
+    const double KP_LINEAR = 0.000020;
+    const double KI_LINEAR = 0.000000005;
+    const double KD_LINEAR = 0.00000002;
+    double previous_error_area = 0.0;
     double integral_linear = 0.0;
 
 
@@ -159,7 +161,6 @@ public:
         resize(img, img, TEMPLATE_SIZE);
         templates_[id] = img;
         templates_loaded_ = true;
-        imshow("Template " + to_string(id), img);
     }
 
 
@@ -208,7 +209,7 @@ public:
         frame_height = img.rows;
         IMG_CENTER_X = frame_width / 2;
         area_threshold = (frame_width * frame_height) / 10.6; 
-        TARGET_AREA = (frame_width * frame_height) / 10;
+        TARGET_AREA = (frame_width * frame_height) / 11.0;
         ROS_INFO_ONCE("Image size: %dx%d", frame_width, frame_height);
         ROS_INFO_ONCE("Image center X: %d", IMG_CENTER_X);
 
@@ -237,7 +238,7 @@ public:
         double error = 0.0;  // 在函数开始处定义error
         double temp_threshold = area_threshold;
         if (obstacle_count_ == 1){
-            temp_threshold = area_threshold * 1.2;
+            temp_threshold = area_threshold * 1.35;
         }
         
         for (const auto& contour : contours) {
@@ -352,7 +353,7 @@ public:
 
         if (contours.empty()) {
             lost_cones_counter_++;
-            if (lost_cones_counter_ > 90) { // 连续丢失超过50帧，切换到寻找模式
+            if (lost_cones_counter_ > 150 && obstacle_count_ >= 2) { // 连续丢失超过50帧，切换到寻找模式
                 current_state_ = STATE_TRACK_TARGET;
                 ROS_INFO("Cones lost, switching to Target Search Mode.");
                 cmd.angular.z = 0.0;
@@ -370,7 +371,7 @@ public:
         else 
         {
             if (obstacle_count_ == 1)
-                controlOne(cmd, LINEAR_SPEED/2, obstacle_detected);
+                controlOne(cmd, LINEAR_SPEED/4, obstacle_detected);
             else
                 controlOne(cmd, LINEAR_SPEED, obstacle_detected);
         }
@@ -450,7 +451,7 @@ public:
                 // 阶段3：左转90度回到原方向
                 cmd.linear.x = 0.2;
                 cmd.angular.z = 0.0;
-                if(elapsed_ms > 4000) {  // 140帧@30fps ≈ 4667ms
+                if(elapsed_ms > 4100) {  // 140帧@30fps ≈ 4667ms
                     avoid_phase_ = RIGHTCORRECT1;
                     phase_start_time_ = std::chrono::steady_clock::now();
                     ROS_INFO("FORWARD2 Phase");
@@ -550,7 +551,6 @@ public:
         kernel = getStructuringElement(MORPH_RECT, Size(3, 3));
         morphologyEx(binary, binary, MORPH_CLOSE, kernel);
 
-        imshow("Threshold", binary); // 调试显示二值化图
 
         // 2. 查找轮廓
         vector<vector<Point>> contours;
@@ -562,13 +562,31 @@ public:
 
         for (const auto& cnt : contours) {
             Rect roi_rect = boundingRect(cnt);
-            double area = contourArea(cnt);
+            double area = roi_rect.width * roi_rect.height;
 
             // 3. 筛选候选区域 (根据面积和长宽比)
             // 假设：数字是垂直长方形，面积适中
             double aspect_ratio = (double)roi_rect.width / roi_rect.height;
+
             
-            if (area > 10000 && area < (frame.rows * frame.cols) && aspect_ratio < 1 && aspect_ratio > 0.15) {
+            if (area > (frame.rows * frame.cols) / 100  && area < (frame.rows * frame.cols) && aspect_ratio < 1.5 && aspect_ratio > 0.15) {
+                // 先提取基本ROI
+                Mat roi = binary(roi_rect).clone();
+                
+                // 闭运算连接数字笔画
+                Mat kernel_roi = getStructuringElement(MORPH_RECT, Size(10, 10));
+                morphologyEx(roi, roi, MORPH_CLOSE, kernel_roi);
+                
+                // 填充轮廓使数字变为实心白色
+                vector<vector<Point>> roi_contours;
+                findContours(roi.clone(), roi_contours, RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+                for (const auto& c : roi_contours) {
+                    drawContours(roi, vector<vector<Point>>{c}, -1, Scalar(255), FILLED);
+                }
+                
+                // 将处理后的roi放回binary
+                roi.copyTo(binary(roi_rect));
+                
                 // 扩展 ROI 范围，避免裁剪数字边缘
                 int padding_w = roi_rect.width * 0.15;
                 int padding_h = roi_rect.height * 0.15;
@@ -579,12 +597,9 @@ public:
                 int x2 = min(roi_rect.x + roi_rect.width + padding_w, binary.cols);
                 int y2 = min(roi_rect.y + roi_rect.height + padding_h, binary.rows);
                 Rect expanded_rect(x1, y1, x2 - x1, y2 - y1);
-                // 提取 ROI 并预处理（与模板一致）
-                Mat roi = binary(expanded_rect).clone();
-                // 闭运算连接数字笔画
-                Mat kernel_roi = getStructuringElement(MORPH_RECT, Size(50, 50));
-                morphologyEx(roi, roi, MORPH_CLOSE, kernel_roi);
-                imshow("ROI Before Resize", roi);
+                
+                // 提取扩展后的ROI
+                roi = binary(expanded_rect).clone();
                 resize(roi, roi, TEMPLATE_SIZE);
 
                 // 4. 模板匹配
@@ -618,8 +633,8 @@ public:
             double center_x = best_rect.x + best_rect.width / 2.0;
             double error_x = IMG_CENTER_X - center_x; // 假设图像宽720
             integral_angular += error_x;
-            if (integral_angular > 100000) integral_angular = 100000;
-            if (integral_angular < -100000) integral_angular = -100000;
+            if (integral_angular > 1000) integral_angular = 1000;
+            if (integral_angular < -1000) integral_angular = -1000;
             
             // 计算面积偏差 (用于前后运动)
             double area = best_rect.width * best_rect.height;
@@ -630,7 +645,8 @@ public:
 
             // PID 控制
             cmd.angular.z = KP_ANGULAR * error_x + KI_ANGULAR * integral_angular;
-            cmd.linear.x = KP_LINEAR * error_area + KI_LINEAR * integral_linear;
+            cmd.linear.x = KP_LINEAR * error_area + KI_LINEAR * integral_linear + KD_LINEAR * (error_area - previous_error_area);
+            previous_error_area = error_area;
             
             ROS_INFO("Detect: %d | Score: %.2f | Area: %.0f", best_digit, max_score, area);
 

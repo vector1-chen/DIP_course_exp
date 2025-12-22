@@ -465,17 +465,16 @@ public:
             case RIGHT1:
                 cmd.linear.x = 0.0;
                 cmd.angular.z = -0.25;
-                if(elapsed_ms > 2500) {  // 70帧@30fps ≈ 2333ms
+                if(elapsed_ms > 2500) {
                     avoid_phase_ = FORWARD11;
                     phase_start_time_ = std::chrono::steady_clock::now();
                     ROS_INFO("RIGHT1 Phase");
                 }
                 break;
             case FORWARD11:
-                // 阶段1：右转90度
                 cmd.linear.x = 0.2;
                 cmd.angular.z = 0.0;
-                if(elapsed_ms > 3500) {  // 100帧@30fps ≈ 3333ms
+                if(elapsed_ms > 3500) {
                     avoid_phase_ = LEFT1;
                     phase_start_time_ = std::chrono::steady_clock::now();
                     ROS_INFO("FORWARD1 Phase");
@@ -484,17 +483,16 @@ public:
             case LEFT1:
                 cmd.linear.x = 0.0;
                 cmd.angular.z = 0.25;
-                if(elapsed_ms > 4200) {  // 120帧@30fps ≈ 4000ms
+                if(elapsed_ms > 4200) {
                     avoid_phase_ = FORWARD12;
                     phase_start_time_ = std::chrono::steady_clock::now();
                     ROS_INFO("LEFT1 Phase");
                 }
                 break;
             case FORWARD12:
-                // 阶段3：左转90度回到原方向
                 cmd.linear.x = 0.2;
                 cmd.angular.z = 0.0;
-                if(elapsed_ms > 4100) {  // 140帧@30fps ≈ 4667ms
+                if(elapsed_ms > 4100) {
                     avoid_phase_ = RIGHTCORRECT1;
                     phase_start_time_ = std::chrono::steady_clock::now();
                     ROS_INFO("FORWARD2 Phase");
@@ -503,7 +501,7 @@ public:
             case RIGHTCORRECT1:
                 cmd.linear.x = 0.0;
                 cmd.angular.z = -0.25;
-                if(elapsed_ms > 1600) {  // 60帧@30fps ≈ 2000ms
+                if(elapsed_ms > 1600) {
                     current_state_ = STATE_LANE_FOLLOW;
                     avoid_phase_ = LEFT2;
                     phase_start_time_ = std::chrono::steady_clock::now();
@@ -521,44 +519,36 @@ public:
 
 
             case LEFT2:
-                // 阶段4：前进一段距离确保完全绕过
                 cmd.linear.x = 0.0;
                 cmd.angular.z = 0.25;
-                if(elapsed_ms > 2500) {  // 70帧@30fps ≈ 2333ms
-                    // 绕行完成，回到原状态
+                if(elapsed_ms > 2500) {
                     avoid_phase_ = FORWARD21;
                     phase_start_time_ = std::chrono::steady_clock::now();
                     ROS_INFO("LEFT2 Phase");
                 }
                 break;
             case FORWARD21:
-                // 阶段4：前进一段距离确保完全绕过
                 cmd.linear.x = 0.2;
                 cmd.angular.z = 0.0;
-                if(elapsed_ms > 3333) {  // 100帧@30fps ≈ 3333ms
-                    // 绕行完成，回到原状态
+                if(elapsed_ms > 3333) {
                     avoid_phase_ = RIGHT2;
                     ROS_INFO("FORWARD21 Phase");
                     phase_start_time_ = std::chrono::steady_clock::now();
                 }
                 break;
             case RIGHT2:
-                // 阶段4：前进一段距离确保完全绕过
                 cmd.linear.x = 0.0;
                 cmd.angular.z = -0.25;
-                if(elapsed_ms > 3333) {  // 100帧@30fps ≈ 3333ms
-                    // 绕行完成，回到原状态
+                if(elapsed_ms > 3333) {
                     avoid_phase_ = RIGHTCORRECT2;
                     ROS_INFO("RIGHT2 Phase");
                     phase_start_time_ = std::chrono::steady_clock::now();
                 }
                 break;
             case RIGHTCORRECT2:
-                // 阶段4：前进一段距离确保完全绕过
                 cmd.linear.x = 0.15;
                 cmd.angular.z = -0.22;
-                if(elapsed_ms > 7000) {  // 210帧@30fps ≈ 7000ms
-                    // 绕行完成，回到原状态
+                if(elapsed_ms > 7000) {
                     current_state_ = STATE_LANE_FOLLOW;
                     avoid_phase_ = RIGHT1;
                     ROS_INFO("RIGHTCORRECT2 Phase - Obstacle Avoidance Complete.");
